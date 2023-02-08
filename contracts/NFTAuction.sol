@@ -11,13 +11,8 @@ pragma solidity ^0.8.0;
 // Original code had a "cancelAuctionWhenPaused" function
 // Change Eth to ART as payment token
 
-//// Implement:
-// "Pull payment" scheme to claim NFT after time is over
-// NatSpec (title of contract, notice, dev, param and return)
-
-// At test environment:
-// Allowance for the auctioneer to escrow user NFT
-// Timer to end auction
+// Future improvements:
+/// deposits to the contract to allow multiple bids without many transactions
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
@@ -39,6 +34,7 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
     event AuctionBid(uint256 tokenId, uint256 bid, address bidder);
     event AuctionFinish(uint256 tokenId, uint256 price, address winner);
     event AuctionCancelled(uint256 tokenId);
+    event Deposit(address depositor, address receiver, uint256 amount);
 
     /// @notice Global variables
     ArtToken public artt;
@@ -46,6 +42,8 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
     uint256 private immutable _auctionFee;
     address private immutable _projectTreasury;
     mapping(uint256 => Auction) private _tokenIdAuction;
+
+    mapping(address => uint256) private _bidDeposits;
 
     /// @notice Auction data structure
     struct Auction {
@@ -73,31 +71,33 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
     }
 
 
+    /// @notice Gets address of the treasury
+    function getTreasury() public view returns(address) {
+        return _projectTreasury;
+    }
+
     /// @notice Checks whether the auction already exists in the record
-    function _isAuction(Auction storage _auction) internal view returns (bool) {
+    function isAuction(uint256 tokenId) public view returns (bool) {
+        Auction memory _auction = _tokenIdAuction[tokenId];
         return (_auction.startedAt > 0);
     }
 
 
     /// @notice Checks whether the auction is currently live
-    function _isAuctionOpen(Auction storage _auction)
-        internal
-        view
-        returns (bool)
-    {
-        return (_auction.startedAt > 0 &&
-            _auction.startedAt + _auction.duration > block.timestamp);
+    function isAuctionOpen(uint256 tokenId) public view returns (bool) {
+        Auction memory _auction = _tokenIdAuction[tokenId];
+        return (_auction.startedAt > 0 && _auction.startedAt + _auction.duration > block.timestamp);
     }
 
 
     /// @notice Checks whether the auction has finished
     /// @param tokenId of the token being sold
     /// @return _isFinished bool: is auction finished?
-    function _isAuctionFinish(uint256 tokenId) internal view returns (bool _isFinished) {
+    function isAuctionFinish(uint256 tokenId) public view returns (bool _isFinished) {
         // Defines auction by tokenId
-        Auction storage auction = _tokenIdAuction[tokenId];
+        Auction memory _auction = _tokenIdAuction[tokenId];
         // Checks if auction has started and finished
-        _isFinished = auction.startedAt > 0 && auction.startedAt + auction.duration <= block.timestamp;
+        _isFinished = _auction.startedAt > 0 && _auction.startedAt + _auction.duration <= block.timestamp;
         return _isFinished;
     }
 
@@ -119,12 +119,7 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
     /// @param tokenId id of the token to be sold
     /// @param startingPrice minimum price
     /// @param duration duration of the auction in seconds
-    function createAuction(
-        uint256 tokenId,
-        uint256 startingPrice,
-        uint256 duration
-    ) public whenNotPaused {
-        
+    function createAuction(uint256 tokenId, uint256 startingPrice, uint256 duration) public whenNotPaused {
         // Check Overflow
         require(startingPrice == uint256(uint128(startingPrice)));
         require(duration == uint256(uint64(duration)));
@@ -143,7 +138,7 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
         nft.transferFrom(nftOwner, address(this), tokenId);
         
         // Create struct with given data
-        Auction memory auction = Auction(
+        Auction memory _auction = Auction(
             uint128(startingPrice),
             0,
             uint64(duration),
@@ -152,13 +147,13 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
             address(0),
             0
         );
-        _tokenIdAuction[tokenId] = auction;
+        _tokenIdAuction[tokenId] = _auction;
 
         emit AuctionCreated(
             uint256(tokenId),
-            uint256(auction.startingPrice),
+            uint256(_auction.startingPrice),
             0,
-            uint256(auction.duration)
+            uint256(_auction.duration)
         );
     }
 
@@ -166,46 +161,47 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
     /// @notice Registers new bid
     /// @param tokenId id of the wanted token
     /// @param bidValue value of the new bid
-    function bid(uint256 tokenId, uint256 bidValue) external payable whenNotPaused nonReentrant {
-        Auction storage auction = _tokenIdAuction[tokenId];
+    function bid(uint256 tokenId, uint256 bidValue) external whenNotPaused nonReentrant {
+        Auction memory _auction = _tokenIdAuction[tokenId];
         // 1. Checks status of auction and bid value
-        require(_isAuctionOpen(auction), "Auction not open");
-        require(bidValue > auction.startingPrice, "bid bellow min price");
-        require(bidValue > auction.lastBid, "bid bellow last bid");
-        require(bidValue <= artt.balanceOf(msg.sender), "Not enough balance of ART token");
-        // Defines new bid
-        uint256 newBid = bidValue;
+        require(isAuctionOpen(tokenId), "Auction not open");
+        require(bidValue > _auction.startingPrice, "Bid bellow min price");
+        require(bidValue > _auction.lastBid, "Bid bellow last bid");
+        require(bidValue <= artt.balanceOf(msg.sender), "Not enough balance of ARTT");
+        // Transfer bid to the contract
+        artt.transferFrom(msg.sender, address(this), bidValue);
 
-        // Checks whether current bid is greater than best bid so far
-        if (auction.lastBid > 0) {
-            // 2. Effects
-            auction.lastBidder = msg.sender;
-            auction.lastBid = newBid;
-            // 3. Interaction
-            artt.transfer(auction.lastBidder, auction.lastBid);
+        // Defines previous last bid and previous last bidder
+        address previousLastBidder = _tokenIdAuction[tokenId].lastBidder;
+        uint256 previousLastBid = _tokenIdAuction[tokenId].lastBid;
+        // If auction has had another bid, refund last bidder
+        if(previousLastBidder != address(0) && previousLastBid != 0) {
+            artt.transferFrom(address(this), previousLastBidder, previousLastBid);
         }
 
-        emit AuctionBid(tokenId, newBid, msg.sender);
+        // Redefine last bid and last bidder
+        _tokenIdAuction[tokenId].lastBidder = msg.sender;
+        _tokenIdAuction[tokenId].lastBid = bidValue;
+        // emit event
+        emit AuctionBid(tokenId, bidValue, msg.sender);
     }
 
 
     /// @notice Stops the auction, sends back the NFT and refunds last bid
     /// @param tokenId id of the token being auctioned
     function cancelAuction(uint256 tokenId) external nonReentrant {
-        
-        Auction storage auction = _tokenIdAuction[tokenId];
-        
+        Auction memory _auction = _tokenIdAuction[tokenId];
         address nftOwner = nft.ownerOf(tokenId);
         // Checks status of the auction and access rights of the msg sender
-        require(_isAuctionOpen(auction), "Auction not open");
+        require(isAuctionOpen(tokenId), "Auction not open");
         require(msg.sender == owner() || msg.sender == nftOwner, "Not Authorized");
 
         // Refunds last bid
-        if (auction.lastBid > 0) {
-            artt.transfer(auction.lastBidder, auction.lastBid);
+        if (_auction.lastBid > 0) {
+            artt.transfer(_auction.lastBidder, _auction.lastBid);
         }
         // Sends back NFT
-        nft.transferFrom(address(this), auction.seller, tokenId);
+        nft.transferFrom(address(this), _auction.seller, tokenId);
 
         delete _tokenIdAuction[tokenId];
         emit AuctionCancelled(tokenId);
@@ -213,34 +209,30 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
 
     /// @notice Closes the auction and excludes its struct from auctions' mapping
     /// @param tokenId id of the token being auctioned
-    function finishAuction(uint256 tokenId)
-        external
-        whenNotPaused
-        nonReentrant
-    {
-        Auction storage auction = _tokenIdAuction[tokenId];
-        require(_isAuctionFinish(tokenId), "Auction not finished");
+    function finishAuction(uint256 tokenId) external whenNotPaused nonReentrant {
+        Auction memory _auction = _tokenIdAuction[tokenId];
+        require(isAuctionFinish(tokenId), "Auction not finished");
 
         // If auction had no bids, send NFT back to its owner
-        if (auction.lastBid == 0) {
-            nft.transferFrom(address(this), auction.seller, tokenId);
-            emit AuctionFinish(tokenId, 0, auction.seller);
+        if (_auction.lastBid == 0) {
+            nft.transferFrom(address(this), _auction.seller, tokenId);
+            emit AuctionFinish(tokenId, 0, _auction.seller);
         // If starting price was reached, transfer the NFT to the last bidder
         } else {
             nft.transferFrom(
                 address(this),
-                auction.lastBidder,
+                _auction.lastBidder,
                 tokenId
             );
             
             // Splits the gain between seller proceeds and treasury fee
-            uint256 treasuryFee = (auction.lastBid * _auctionFee) / 10000;
-            uint256 sellerProceeds = auction.lastBid - treasuryFee;
+            uint256 treasuryFee = (_auction.lastBid * _auctionFee) / 10000;
+            uint256 sellerProceeds = _auction.lastBid - treasuryFee;
             artt.transfer(_projectTreasury, treasuryFee);
-            artt.transfer(auction.seller, sellerProceeds);
+            artt.transfer(_auction.seller, sellerProceeds);
             
             // emits event to the blockchain
-            emit AuctionFinish(tokenId, auction.lastBid, auction.lastBidder);
+            emit AuctionFinish(tokenId, _auction.lastBid, _auction.lastBidder);
         }
         // Delete auction from dataset.
         // Should we include a dataset of past auctions??
@@ -270,26 +262,40 @@ contract NFTAuction is Ownable, Pausable, ReentrancyGuard {
             address lastBidder
         )
     {
-        Auction storage auction = _tokenIdAuction[tokenId];
-        require(_isAuction(auction), "Not Auction");
+        Auction memory _auction = _tokenIdAuction[tokenId];
+        require(isAuction(tokenId), "Not Auction");
         return (
-            auction.seller,
-            auction.startingPrice,
-            auction.endingPrice,
-            auction.duration,
-            auction.startedAt,
-            auction.lastBid,
-            auction.lastBidder
+            _auction.seller,
+            _auction.startingPrice,
+            _auction.endingPrice,
+            _auction.duration,
+            _auction.startedAt,
+            _auction.lastBid,
+            _auction.lastBidder
         );
+    }
+
+
+    /// @notice Informs the auction starting price of the given token
+    /// @param tokenId id of the token being auctioned
+    /// @return startingPrice
+    function getAuctionStartingPrice(uint256 tokenId)
+        external
+        view
+        returns (uint256)
+    {
+        Auction memory _auction = _tokenIdAuction[tokenId];
+        require(isAuction(tokenId), "Not Auction");
+        uint256 auctionStartingPrice = _auction.startingPrice;
+        return (auctionStartingPrice);
     }
 
 
     /// @notice informs the best bid of auction of the given token
     /// @param tokenId id of the token being auctioned
     /// @return lastBid best bid value
-    function getlastBid(uint256 tokenId) external view returns (uint256) {
-        Auction storage auction = _tokenIdAuction[tokenId];
-        require(_isAuction(auction), "Not Auction");
-        return auction.lastBid;
+    function getLastBid(uint256 tokenId) external view returns (uint256) {
+        require(isAuction(tokenId), "Not Auction");
+        return _tokenIdAuction[tokenId].lastBid;
     }
 }
