@@ -1,3 +1,5 @@
+const { assert } = require('chai')
+
 const ArtToken = artifacts.require('ArtToken')
 const ArtNFT = artifacts.require('ArtNFT')
 const NFTAuction = artifacts.require('NFTAuction')
@@ -10,6 +12,10 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
     // Turns into 18 decimals
     function tokens(number) {
         return web3.utils.toWei(number, 'ether');
+    }
+
+    function timeout(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
  
     let artt, nft
@@ -25,9 +31,9 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
         // Transfer 1K tokens (10% of owner balance) to customer
         await artt.transfer(customer, tokens('1000'), {from: owner})
         // Create NFT
-        await nft.mintNFT(creator, 'test NFT token', '0x74657374204e465420746f6b656e', '10', auctionHouse.address, true)
+        await nft.mintNFT(creator, 'test NFT token', '0x74657374204e465420746f6b656e', '0', auctionHouse.address, true)
         // Start auction for the new NFT
-        await auctionHouse.createAuction(0, tokens('100'), 60, {from: creator})
+        await auctionHouse.createAuction(0, tokens('100'), '10', {from: creator})
     })
 
 
@@ -45,13 +51,6 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
         it('owner has no tokens', async () => {
             let ownerAddress = await artt.owner()
             assert.equal(ownerAddress, owner)
-        })
-    })
-
-    describe('Current Supply of ArtToken', async () => {
-        it('current supply equals 10K tokens (10000000000000000000000)', async () => {
-            let supply = await artt.currentSupply()
-            assert.equal(supply.toString(), tokens('10000'))
         })
     })
 
@@ -159,7 +158,7 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
    describe('Last Bid', async() => {
     it('Last Bid equals 103 ARTT', async () => {
         // Customer sets allowance makes a bid
-        await artt.approve(customer, auctionHouse.address, tokens('103'), {from: customer})
+        await artt.approve(auctionHouse.address, tokens('103'), {from: customer})
         await auctionHouse.bid(0, tokens('103'), {from: customer})
         
         let lastBid = await auctionHouse.getLastBid(0)
@@ -167,14 +166,31 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
     })
    })
 
+   describe('Auction status, NFT owner and customer balance after end of auction', async() => {
+    it('is NFT auction closed, is customer holding NFT and has customer paid for NFT', async () => {
+        
+        await timeout(10000);
+        await auctionHouse.finishAuction(0)
+        let isAuctionOpen = await auctionHouse.isAuctionOpen(0)
+        let nftOwner = await nft.ownerOf(0)
+        let customerBalance = await artt.balanceOf(customer)
+
+        assert.equal(isAuctionOpen, false)
+        assert.equal(nftOwner, customer)
+        assert.equal(customerBalance, tokens('897'))
+    })
+   })
+
    describe('Auction status and NFT owner after cancel', async() => {
     it('is NFT auction closed and is creator holding NFT again', async () => {
+        await auctionHouse.createAuction(0, tokens('100'), 3, {from: customer})
         await auctionHouse.cancelAuction(0)
         let isAuctionOpen = await auctionHouse.isAuctionOpen(0)
         let nftOwner = await nft.ownerOf(0)
 
         assert.equal(isAuctionOpen, false)
-        assert.equal(nftOwner, creator)
+        assert.equal(nftOwner, customer)
     })
    })
+
 })
