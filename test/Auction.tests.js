@@ -33,7 +33,7 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
         // Create NFT
         await nft.mintNFT(creator, 'test NFT token', '0x74657374204e465420746f6b656e', '0', auctionHouse.address, true)
         // Start auction for the new NFT
-        await auctionHouse.createAuction(0, tokens('100'), '10', {from: creator})
+        await auctionHouse.createAuction(0, tokens('100'), '15', {from: creator})
     })
 
 
@@ -169,21 +169,24 @@ contract('NFTAuction', ([owner, customer, creator, treasury]) => {
    describe('Auction status, NFT owner and customer balance after end of auction', async() => {
     it('is NFT auction closed, is customer holding NFT and has customer paid for NFT', async () => {
         
-        await timeout(10000);
+        await timeout(15000);
         await auctionHouse.finishAuction(0)
         let isAuctionOpen = await auctionHouse.isAuctionOpen(0)
         let nftOwner = await nft.ownerOf(0)
         let customerBalance = await artt.balanceOf(customer)
+        let creatorBalance = await artt.balanceOf(creator)
 
         assert.equal(isAuctionOpen, false)
         assert.equal(nftOwner, customer)
         assert.equal(customerBalance, tokens('897'))
+        console.log("creator balance: ", creatorBalance.toString())
     })
    })
 
    describe('Auction status and NFT owner after cancel', async() => {
     it('is NFT auction closed and is creator holding NFT again', async () => {
-        await auctionHouse.createAuction(0, tokens('100'), 3, {from: customer})
+        await nft.approve(auctionHouse.address, 0, {from: customer})
+        await auctionHouse.createAuction(0, tokens('105'), '60', {from: customer})
         await auctionHouse.cancelAuction(0)
         let isAuctionOpen = await auctionHouse.isAuctionOpen(0)
         let nftOwner = await nft.ownerOf(0)
